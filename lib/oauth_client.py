@@ -599,28 +599,49 @@ class OAuthClient:
         return None
     
     def _decode_oauth_session_cookie(self):
-        """解码 oai-client-auth-session cookie"""
-        import json
-        import base64
-        
+        """?? oai-client-auth-session cookie?"""
         try:
             for cookie in self.session.cookies:
                 try:
-                    name = cookie.name if hasattr(cookie, 'name') else str(cookie)
-                    if name == "oai-client-auth-session":
-                        value = cookie.value if hasattr(cookie, 'value') else self.session.cookies.get(name)
-                        if value:
-                            # 解码 base64
-                            decoded = base64.b64decode(value).decode('utf-8')
-                            data = json.loads(decoded)
-                            return data
+                    name = cookie.name if hasattr(cookie, "name") else str(cookie)
+                    if name != "oai-client-auth-session":
+                        continue
+                    value = cookie.value if hasattr(cookie, "value") else self.session.cookies.get(name)
+                    data = self._decode_cookie_payload(value)
+                    if data:
+                        return data
                 except Exception:
                     continue
         except Exception:
             pass
-        
+
         return None
-    
+
+    def _decode_cookie_payload(self, value):
+        """????????? cookie ???"""
+        import base64
+        import json
+
+        if not value:
+            return None
+
+        candidates = [value]
+        if "." in value:
+            candidates.extend(part for part in value.split(".") if part)
+
+        for candidate in candidates:
+            padded = candidate + "=" * ((4 - len(candidate) % 4) % 4)
+            for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+                try:
+                    decoded = decoder(padded.encode("utf-8")).decode("utf-8")
+                    data = json.loads(decoded)
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    continue
+
+        return None
+
     def _exchange_code_for_tokens(self, code, code_verifier, user_agent, impersonate):
         """用 authorization code 换取 tokens"""
         url = f"{self.oauth_issuer}/oauth/token"
