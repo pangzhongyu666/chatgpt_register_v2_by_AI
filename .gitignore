@@ -25,3 +25,5 @@ rename_tokens.py
 
 *.log
 *.tmp
+
+tokens/
