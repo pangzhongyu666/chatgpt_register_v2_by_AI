@@ -11,5 +11,16 @@
     "oauth_redirect_uri": "http://localhost:1455/auth/callback",
     "ak_file": "ak.txt",
     "rk_file": "rk.txt",
-    "token_json_dir": "tokens"
+    "token_json_dir": "tokens",
+    "cpa_base_url": "",
+    "cpa_token": "",
+    "cpa_workers": 20,
+    "cpa_timeout": 12,
+    "cpa_retries": 1,
+    "cpa_used_threshold": 95,
+    "cpa_clean": false,
+    "cpa_upload": false,
+    "cpa_target_count": 0,
+    "cpa_prune_local": false,
+    "cpa_user_agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 }

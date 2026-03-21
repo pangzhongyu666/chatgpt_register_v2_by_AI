@@ -1,214 +1,188 @@
 """
-ChatGPT 批量自动注册工具 v2.0 - 模块化版本
-使用 Skymail 临时邮箱，并发自动注册 ChatGPT 账号
+ChatGPT 批量自动注册工具 v2.0。
+使用 Skymail 临时邮箱，并发自动注册 ChatGPT 账号。
 """
 
-import sys
-import time
-import threading
 import argparse
+import sys
+import threading
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 禁用 SSL 警告
-warnings.filterwarnings('ignore', message='Unverified HTTPS request')
-
-# 导入自定义模块
-from lib.config import load_config, as_bool
+from lib.chatgpt_client import ChatGPTClient
+from lib.config import as_bool, load_config
+from lib.oauth_client import OAuthClient
 from lib.skymail_client import init_skymail_client
 from lib.token_manager import TokenManager
-from lib.chatgpt_client import ChatGPTClient
-from lib.oauth_client import OAuthClient
-from lib.utils import generate_random_password, generate_random_name, generate_random_birthday
+from lib.utils import generate_random_birthday, generate_random_name, generate_random_password
+
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
+_write_lock = threading.Lock()
+
+
+def append_output_line(filepath, line):
+    with _write_lock:
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def register_one_account(idx, total, skymail_client, token_manager, oauth_client, config, max_retries=3):
-    """
-    注册单个账号的完整流程（带重试机制）
-    
-    Args:
-        idx: 账号序号
-        total: 总账号数
-        skymail_client: Skymail 客户端
-        token_manager: Token 管理器
-        oauth_client: OAuth 客户端
-        config: 配置字典
-        max_retries: 最大重试次数
-        
-    Returns:
-        tuple: (success, email, password, message)
-    """
+    """注册单个账号。"""
     tag = f"[{idx}/{total}]"
-    
+
     for attempt in range(max_retries):
         if attempt > 0:
             print(f"\n{tag} 重试注册 (尝试 {attempt + 1}/{max_retries})...")
-            time.sleep(1)  # 重试前等待
+            time.sleep(1)
         else:
             print(f"\n{tag} 开始注册...")
-        
+
         try:
-            # 1. 创建临时邮箱
             print(f"{tag} 创建 Skymail 临时邮箱...")
-            email, mail_token = skymail_client.create_temp_email()
+            email, _mailbox_password = skymail_client.create_temp_email()
             print(f"{tag} 邮箱: {email}")
-            
-            # 2. 生成随机密码和个人信息
+
             password = generate_random_password()
             first_name, last_name = generate_random_name()
             birthdate = generate_random_birthday()
-            
             print(f"{tag} 密码: {password}")
             print(f"{tag} 姓名: {first_name} {last_name}")
-            
-            # 3. 创建 ChatGPT 客户端
+
             proxy = config.get("proxy", "")
             chatgpt_client = ChatGPTClient(proxy=proxy, verbose=True)
-            
-            # 4. 执行注册流程
+
             print(f"{tag} 开始注册流程...")
             success, msg = chatgpt_client.register_complete_flow(
                 email, password, first_name, last_name, birthdate, skymail_client
             )
-            
             if not success:
-                # 检查是否是 TLS 错误，如果是则重试
                 is_tls_error = "TLS" in msg or "SSL" in msg or "curl: (35)" in msg
                 if is_tls_error and attempt < max_retries - 1:
-                    print(f"{tag} ⚠️ TLS 错误，准备重试: {msg}")
+                    print(f"{tag} [WARN] TLS 错误，准备重试: {msg}")
                     continue
-                else:
-                    print(f"{tag} ❌ 注册失败: {msg}")
-                    return False, email, password, msg
-            
-            print(f"{tag} ✅ 注册成功")
-            
-            # 5. OAuth 登录获取 Token（如果启用）
+                print(f"{tag} [ERROR] 注册失败: {msg}")
+                return False, email, password, msg
+
+            print(f"{tag} [OK] 注册成功")
+
             enable_oauth = as_bool(config.get("enable_oauth", True))
             oauth_required = as_bool(config.get("oauth_required", True))
-            
+            output_file = config.get("output_file", "registered_accounts.txt")
+
             if enable_oauth:
                 print(f"{tag} 开始 OAuth 登录...")
-                
-                # 直接使用 ChatGPT 客户端的 session 进行 OAuth（关键！）
-                # 不创建新的 OAuthClient，而是复用注册时的 session
-                oauth_client_reuse = OAuthClient(config, proxy=config.get("proxy", ""), verbose=True)
-                # 在初始化后立即替换 session，保留注册时的所有 cookies
+                oauth_client_reuse = OAuthClient(config, proxy=proxy, verbose=True)
                 oauth_client_reuse.session = chatgpt_client.session
-                
                 tokens = oauth_client_reuse.login_and_get_tokens(
-                    email, password,
+                    email,
+                    password,
                     chatgpt_client.device_id,
                     chatgpt_client.ua,
                     chatgpt_client.sec_ch_ua,
                     chatgpt_client.impersonate,
-                    skymail_client
+                    skymail_client,
                 )
-                
+
                 if tokens and tokens.get("access_token"):
-                    print(f"{tag} ✅ OAuth 成功")
-                    token_manager.save_tokens(email, tokens)
-                    
-                    # 保存账号信息
-                    output_file = config.get("output_file", "registered_accounts.txt")
-                    with threading.Lock():
-                        with open(output_file, "a", encoding="utf-8") as f:
-                            f.write(f"{email}----{password}----oauth=ok\n")
-                    
+                    print(f"{tag} [OK] OAuth 成功")
+                    token_manager.save_account(email, password)
+                    token_manager.save_tokens(email, tokens, password=password)
+                    append_output_line(output_file, f"{email}----{password}----oauth=ok")
+
+                    if token_manager.cpa_clean_enabled:
+                        token_manager.clean_invalid_cpa_tokens()
+
                     return True, email, password, "注册成功 + OAuth 成功"
-                else:
-                    print(f"{tag} ⚠️ OAuth 失败")
-                    if oauth_required:
-                        # OAuth 失败但是必需的，如果还有重试机会则重试
-                        if attempt < max_retries - 1:
-                            print(f"{tag} OAuth 失败，准备重试整个流程...")
-                            continue
-                        return False, email, password, "OAuth 失败（必需）"
-                    else:
-                        # 保存账号信息（无 OAuth）
-                        output_file = config.get("output_file", "registered_accounts.txt")
-                        with threading.Lock():
-                            with open(output_file, "a", encoding="utf-8") as f:
-                                f.write(f"{email}----{password}----oauth=failed\n")
-                        return True, email, password, "注册成功（OAuth 失败）"
-            else:
-                # 不启用 OAuth，直接保存账号
-                output_file = config.get("output_file", "registered_accounts.txt")
-                with threading.Lock():
-                    with open(output_file, "a", encoding="utf-8") as f:
-                        f.write(f"{email}----{password}\n")
-                return True, email, password, "注册成功"
-            
+
+                print(f"{tag} [WARN] OAuth 失败")
+                if oauth_required:
+                    if attempt < max_retries - 1:
+                        print(f"{tag} OAuth 失败，准备重试整个流程...")
+                        continue
+                    return False, email, password, "OAuth 失败（必需）"
+
+                append_output_line(output_file, f"{email}----{password}----oauth=failed")
+                token_manager.save_account(email, password)
+                return True, email, password, "注册成功（OAuth 失败）"
+
+            append_output_line(output_file, f"{email}----{password}")
+            token_manager.save_account(email, password)
+            return True, email, password, "注册成功"
+
         except Exception as e:
             error_msg = str(e)
             is_tls_error = "TLS" in error_msg or "SSL" in error_msg or "curl: (35)" in error_msg
-            
             if is_tls_error and attempt < max_retries - 1:
-                print(f"{tag} ⚠️ 异常 (TLS 错误)，准备重试: {error_msg[:100]}")
+                print(f"{tag} [WARN] 异常 (TLS 错误)，准备重试: {error_msg[:100]}")
                 continue
-            else:
-                print(f"{tag} ❌ 注册失败: {e}")
-                import traceback
-                traceback.print_exc()
-                return False, "", "", str(e)
-    
-    # 所有重试都失败
+
+            print(f"{tag} [ERROR] 注册失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, "", "", str(e)
+
     return False, "", "", "重试次数已用尽"
 
 
 def main():
-    """主函数"""
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description='ChatGPT 批量自动注册工具 v2.0')
-    parser.add_argument('-n', '--num', type=int, default=1, help='注册账号数量（默认: 1）')
-    parser.add_argument('-w', '--workers', type=int, default=1, help='并发线程数（默认: 1）')
-    parser.add_argument('--no-oauth', action='store_true', help='禁用 OAuth 登录')
+    parser = argparse.ArgumentParser(description="ChatGPT 批量自动注册工具 v2.0")
+    parser.add_argument("-n", "--num", type=int, default=1, help="注册账号数量")
+    parser.add_argument("-w", "--workers", type=int, default=1, help="并发线程数")
+    parser.add_argument("--no-oauth", action="store_true", help="禁用 OAuth 登录")
     args = parser.parse_args()
-    
+
     print("=" * 60)
     print("  ChatGPT 批量自动注册工具 v2.0 (模块化版本)")
     print("  使用 Skymail 临时邮箱")
     print("=" * 60)
-    
-    # 加载配置
+
     config = load_config()
-    
-    # 命令行参数覆盖配置文件
     total_accounts = args.num
     max_workers = args.workers
     if args.no_oauth:
-        config['enable_oauth'] = False
-    
-    # 初始化 Skymail 客户端
+        config["enable_oauth"] = False
+
     skymail_client = init_skymail_client(config)
-    
-    # 初始化 Token 管理器
     token_manager = TokenManager(config)
-    
-    # 初始化 OAuth 客户端
     oauth_client = OAuthClient(config, proxy=config.get("proxy", ""), verbose=True)
-    
-    # 获取配置参数
+
     output_file = config.get("output_file", "registered_accounts.txt")
     enable_oauth = as_bool(config.get("enable_oauth", True))
-    
-    print(f"\n配置信息:")
+
+    print("\n配置信息:")
     print(f"  注册数量: {total_accounts}")
     print(f"  并发数: {max_workers}")
     print(f"  输出文件: {output_file}")
     print(f"  Skymail API: {skymail_client.api_base}")
     print(f"  Token 目录: {token_manager.token_dir}")
     print(f"  启用 OAuth: {enable_oauth}")
+    if token_manager.cpa_manager and token_manager.cpa_manager.enabled():
+        print(f"  CPA Base URL: {token_manager.cpa_base_url}")
+        print(f"  CPA 自动上传: {token_manager.cpa_upload_enabled}")
+        print(f"  CPA 自动清理: {token_manager.cpa_clean_enabled}")
+        if token_manager.cpa_target_count > 0:
+            print(f"  CPA 目标数量: {token_manager.cpa_target_count}")
     print()
-    
-    # 批量注册
+
+    if token_manager.cpa_clean_enabled:
+        token_manager.clean_invalid_cpa_tokens()
+
+    if token_manager.should_stop_for_cpa_target():
+        print("[CPA] 已达到目标 token 数量，跳过本次注册。")
+        return
+
     success_count = 0
     failed_count = 0
     start_time = time.time()
-    
+
     if max_workers == 1:
-        # 串行执行
         for i in range(1, total_accounts + 1):
+            if token_manager.should_stop_for_cpa_target():
+                print("[CPA] 已达到目标 token 数量，提前结束。")
+                break
+
             success, email, password, msg = register_one_account(
                 i, total_accounts, skymail_client, token_manager, oauth_client, config
             )
@@ -217,16 +191,20 @@ def main():
             else:
                 failed_count += 1
     else:
-        # 并发执行
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for i in range(1, total_accounts + 1):
                 future = executor.submit(
                     register_one_account,
-                    i, total_accounts, skymail_client, token_manager, oauth_client, config
+                    i,
+                    total_accounts,
+                    skymail_client,
+                    token_manager,
+                    oauth_client,
+                    config,
                 )
                 futures.append(future)
-            
+
             for future in as_completed(futures):
                 try:
                     success, email, password, msg = future.result()
@@ -235,21 +213,20 @@ def main():
                     else:
                         failed_count += 1
                 except Exception as e:
-                    print(f"❌ 任务异常: {e}")
+                    print(f"[ERROR] 任务异常: {e}")
                     failed_count += 1
-    
+
     end_time = time.time()
     total_time = end_time - start_time
-    
-    # 输出统计
+
     print("\n" + "=" * 60)
-    print(f"注册完成！")
+    print("注册完成！")
     print(f"  成功: {success_count}")
     print(f"  失败: {failed_count}")
-    print(f"  总计: {total_accounts}")
+    print(f"  总计: {success_count + failed_count}")
     print(f"  总耗时: {total_time:.1f}s")
     if success_count > 0:
-        print(f"  平均耗时: {total_time/total_accounts:.1f}s/账号")
+        print(f"  平均耗时: {total_time / max(success_count + failed_count, 1):.1f}s/账号")
     print("=" * 60)
 
 
