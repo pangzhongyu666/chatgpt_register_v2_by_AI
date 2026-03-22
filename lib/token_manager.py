@@ -111,8 +111,10 @@ class MiniPoolMaintainer:
                 "total": len(files),
                 "candidates": 0,
                 "invalid_count": 0,
+                "used_up_count": 0,
                 "deleted_ok": 0,
                 "deleted_fail": 0,
+                "delete_fail_details": [],
             }
 
         semaphore = asyncio.Semaphore(max(1, workers))
@@ -183,7 +185,12 @@ class MiniPoolMaintainer:
 
         async def delete_one(session, name):
             if not name:
-                return False
+                return {
+                    "ok": False,
+                    "name": name,
+                    "status": None,
+                    "response": "missing name",
+                }
             encoded = quote(name, safe="")
             try:
                 async with semaphore:
@@ -194,9 +201,20 @@ class MiniPoolMaintainer:
                     ) as resp:
                         text = await resp.text()
                         data = self._safe_json(text)
-                        return resp.status == 200 and data.get("status") == "ok"
-            except Exception:
-                return False
+                        ok = resp.status == 200 and data.get("status") == "ok"
+                        return {
+                            "ok": ok,
+                            "name": name,
+                            "status": resp.status,
+                            "response": text[:200],
+                        }
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "name": name,
+                    "status": None,
+                    "response": str(e)[:200],
+                }
 
         invalid_list = []
         used_up_list = []
@@ -219,11 +237,14 @@ class MiniPoolMaintainer:
             ]
             deleted_ok = 0
             deleted_fail = 0
+            delete_fail_details = []
             for task in asyncio.as_completed(delete_tasks):
-                if await task:
+                delete_result = await task
+                if delete_result.get("ok"):
                     deleted_ok += 1
                 else:
                     deleted_fail += 1
+                    delete_fail_details.append(delete_result)
 
         return {
             "total": len(files),
@@ -232,6 +253,7 @@ class MiniPoolMaintainer:
             "used_up_count": len(used_up_list),
             "deleted_ok": deleted_ok,
             "deleted_fail": deleted_fail,
+            "delete_fail_details": delete_fail_details,
         }
 
     def probe_and_clean_sync(self, workers=20, timeout=10, retries=1):
@@ -407,6 +429,13 @@ class TokenManager:
                 f"deleted_ok={result.get('deleted_ok')} "
                 f"deleted_fail={result.get('deleted_fail')}"
             )
+            fail_details = result.get("delete_fail_details") or []
+            for item in fail_details[:10]:
+                print(
+                    "[CPA] 删除失败: "
+                    f"name={item.get('name')} status={item.get('status')} "
+                    f"response={item.get('response')}"
+                )
             return result
         except Exception as e:
             print(f"[CPA] 清理失败: {e}")
