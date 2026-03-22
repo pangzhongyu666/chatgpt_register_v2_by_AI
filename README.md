@@ -111,10 +111,10 @@ pip install curl_cffi requests aiohttp
   - 注册并拿到 Token 后自动上传到 CPA
 
 - `cpa_clean`
-  - 注册前后自动清理 CPA 中失效或额度过高的账号
+  - 注册前后自动清理 CPA 中已失效的账号
 
 - `cpa_used_threshold`
-  - `used_percent` 阈值，达到或超过后会被判定为需要清理
+  - `used_percent` 阈值，达到或超过后仅做统计标记，不会参与清理
 
 - `cpa_target_count`
   - CPA 中有效 token 达到这个数量后，程序会停止继续注册
@@ -182,7 +182,7 @@ python chatgpt_register_v2.py -n 10 -w 5 --no-oauth
 ### 4. CPA 维护
 
 - 可在注册前后拉取 CPA `auth-files`
-- 可检测 `401` 或 `used_percent >= cpa_used_threshold` 的账号
+- 可检测 `401` 失效账号，并统计 `used_percent >= cpa_used_threshold` 的账号
 - 可自动删除失效账号
 - 可在上传成功后清理本地文件
 

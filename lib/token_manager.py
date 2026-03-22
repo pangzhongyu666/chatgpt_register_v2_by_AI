@@ -126,7 +126,7 @@ class MiniPoolMaintainer:
                 "name": name,
                 "auth_index": auth_index,
                 "invalid_401": False,
-                "invalid_used_percent": False,
+                "used_up": False,
                 "used_percent": None,
             }
             if not auth_index:
@@ -172,7 +172,8 @@ class MiniPoolMaintainer:
                                 )
                                 if used_pct is not None:
                                     result["used_percent"] = used_pct
-                                    result["invalid_used_percent"] = used_pct >= self.used_percent_threshold
+                                    # 额度用完仅做标记，不参与清理，避免误删可刷新/可复用 token。
+                                    result["used_up"] = used_pct >= self.used_percent_threshold
                             return result
                 except Exception as e:
                     if attempt >= retries:
@@ -198,6 +199,7 @@ class MiniPoolMaintainer:
                 return False
 
         invalid_list = []
+        used_up_list = []
         async with aiohttp.ClientSession(
             connector=connector,
             timeout=client_timeout,
@@ -206,8 +208,10 @@ class MiniPoolMaintainer:
             tasks = [asyncio.create_task(probe_one(session, item)) for item in candidates]
             for task in asyncio.as_completed(tasks):
                 result = await task
-                if result.get("invalid_401") or result.get("invalid_used_percent"):
+                if result.get("invalid_401"):
                     invalid_list.append(result)
+                elif result.get("used_up"):
+                    used_up_list.append(result)
 
             delete_tasks = [
                 asyncio.create_task(delete_one(session, item.get("name")))
@@ -225,6 +229,7 @@ class MiniPoolMaintainer:
             "total": len(files),
             "candidates": len(candidates),
             "invalid_count": len(invalid_list),
+            "used_up_count": len(used_up_list),
             "deleted_ok": deleted_ok,
             "deleted_fail": deleted_fail,
         }
@@ -398,7 +403,8 @@ class TokenManager:
             print(
                 "[CPA] 清理完成: "
                 f"total={result.get('total')} candidates={result.get('candidates')} "
-                f"invalid={result.get('invalid_count')} deleted_ok={result.get('deleted_ok')} "
+                f"invalid={result.get('invalid_count')} used_up={result.get('used_up_count', 0)} "
+                f"deleted_ok={result.get('deleted_ok')} "
                 f"deleted_fail={result.get('deleted_fail')}"
             )
             return result
